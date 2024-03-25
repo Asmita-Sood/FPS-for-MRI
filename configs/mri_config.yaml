@@ -5,7 +5,7 @@ conditioning:
 
 data:
   name: fastmri
-  root: ./data/samples/
+  root: ./data/mri_samples/ #move data point from gdrive to this path
 
 measurement:
   operator:
