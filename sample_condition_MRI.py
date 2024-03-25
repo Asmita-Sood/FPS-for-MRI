@@ -145,6 +145,12 @@ def main():
 
             y = task_Svd.forward(ref_img)
             y_n = noiser(y)
+
+        elif measure_config['operator'] ['name'] == 'mri_reconstruction':
+
+            sample_fn = partial(sample_fn, operator = operator, op = 'mri_reconstruction', mask = None)
+            y = operator.forward(ref_img)
+            y_n = noiser(y)
         
         else: 
             sample_fn = partial(sample_fn, operator = operator, op = 'super_resolution', mask = None)
