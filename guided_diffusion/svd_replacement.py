@@ -265,6 +265,105 @@ class SuperResolution(H_functions):
         vec = self.V(vec)
         vec = vec.reshape(vec.shape[0],3,256,256)
         return vec
+
+#MRI Reconstruction
+class MriReconstruction(H_functions):
+    def __init__(self, channels, img_dim, ratio, device): #ratio = 2 or 4
+        assert img_dim % ratio == 0
+        self.img_dim = img_dim
+        self.channels = channels
+        self.y_dim = img_dim // ratio
+        self.ratio = ratio
+        self.length = channels * img_dim ** 2
+        self.small_length = channels * self.y_dim ** 2
+        H = torch.Tensor([[1 / ratio**2] * ratio**2]).to(device)
+        self.U_small, self.singulars_small, self.V_small = torch.svd(H, some=False)
+        self.Vt_small = self.V_small.transpose(0, 1)
+        self.all_singulars = self.add_zeros(self.singulars())
+
+    def V(self, vec):
+        #reorder the vector back into patches (because singulars are ordered descendingly)
+        temp = vec.clone().reshape(vec.shape[0], -1)
+        patches = torch.zeros(vec.shape[0], self.channels, self.y_dim**2, self.ratio**2, device=vec.device)
+        patches[:, :, :, 0] = temp[:, :self.channels * self.y_dim**2].view(vec.shape[0], self.channels, -1)
+        for idx in range(self.ratio**2-1):
+            patches[:, :, :, idx+1] = temp[:, (self.channels*self.y_dim**2+idx)::self.ratio**2-1].view(vec.shape[0], self.channels, -1)
+        #multiply each patch by the small V
+        patches = torch.matmul(self.V_small, patches.reshape(-1, self.ratio**2, 1)).reshape(vec.shape[0], self.channels, -1, self.ratio**2)
+        #repatch the patches into an image
+        patches_orig = patches.reshape(vec.shape[0], self.channels, self.y_dim, self.y_dim, self.ratio, self.ratio)
+        recon = patches_orig.permute(0, 1, 2, 4, 3, 5).contiguous()
+        recon = recon.reshape(vec.shape[0], self.channels * self.img_dim ** 2)
+        return recon
+
+    def Vt(self, vec):
+        #extract flattened patches
+        patches = vec.clone().reshape(vec.shape[0], self.channels, self.img_dim, self.img_dim)
+        patches = patches.unfold(2, self.ratio, self.ratio).unfold(3, self.ratio, self.ratio)
+        unfold_shape = patches.shape
+        patches = patches.contiguous().reshape(vec.shape[0], self.channels, -1, self.ratio**2)
+        #multiply each by the small V transposed
+        patches = torch.matmul(self.Vt_small, patches.reshape(-1, self.ratio**2, 1)).reshape(vec.shape[0], self.channels, -1, self.ratio**2)
+        #reorder the vector to have the first entry first (because singulars are ordered descendingly)
+        recon = torch.zeros(vec.shape[0], self.channels * self.img_dim**2, device=vec.device)
+        recon[:, :self.channels * self.y_dim**2] = patches[:, :, :, 0].view(vec.shape[0], self.channels * self.y_dim**2)
+        for idx in range(self.ratio**2-1):
+            recon[:, (self.channels*self.y_dim**2+idx)::self.ratio**2-1] = patches[:, :, :, idx+1].view(vec.shape[0], self.channels * self.y_dim**2)
+        return recon
+
+    def U(self, vec):
+        return self.U_small[0, 0] * vec.clone().reshape(vec.shape[0], -1)
+
+    def Ut(self, vec): #U is 1x1, so U^T = U
+        return self.U_small[0, 0] * vec.clone().reshape(vec.shape[0], -1)
+
+    def singulars(self):
+        return torch.unsqueeze(self.singulars_small.repeat(self.channels * self.y_dim**2), 0)
+        
+    def Sigma(self, vec):
+        return vec * self.all_singulars
+
+    def add_zeros(self, vec):
+        temp = torch.zeros((vec.shape[0], vec.shape[1] * self.ratio**2), device=vec.device)
+        temp[:, :vec.shape[1]] = vec
+        return temp
+        
+    def get_mean(self, vec, t):
+        # return (I+A'A/t)^{-1} vec
+        vec = vec.reshape(vec.shape[0], -1)
+        recon = self.Vt(vec)
+        if t == 0.0:
+            param = torch.zeros((vec.shape[0], self.length), device=vec.device)
+            param[:, self.small_length:] = torch.ones((vec.shape[0], self.length - self.small_length), dtype=torch.float64)
+        else:
+            ones = torch.ones((vec.shape[0], self.length), device=vec.device) * t
+            param = ones / (ones + self.all_singulars * self.all_singulars)
+            
+        recon = param * recon
+        recon = self.V(recon)
+        
+        return recon
+    
+    def get_noise(self, vec, t):
+        # return noise with covariance (I+A'A/t)^{-1}.
+        vec = vec.reshape(vec.shape[0], -1)
+        if t == 0.0:
+            param = torch.zeros((vec.shape[0], self.length), device=vec.device)
+            param[:, self.small_length:] = torch.ones((vec.shape[0], self.length - self.small_length), dtype=torch.float64)
+        else:
+            ones = torch.ones((vec.shape[0], self.length), device=vec.device, dtype=torch.float64) * t
+            param = torch.sqrt(ones / (ones + self.all_singulars * self.all_singulars))
+        recon = param * vec
+        recon = self.V(recon)
+
+        return recon
+        
+    def transpose(self, vec):
+        vec = self.Ut(vec)
+        vec = self.add_zeros(self.singulars() * vec)
+        vec = self.V(vec)
+        vec = vec.reshape(vec.shape[0],3,256,256)
+        return vec
         
 
 #Colorization
